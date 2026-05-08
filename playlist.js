@@ -1,12 +1,11 @@
-// js/playlist.js
+// js/playlist.js - VERSION MISE À JOUR
 class PlaylistManager {
     constructor() {
         this.tracks = [];
         this.currentFilter = 'all';
-        this.loadFromStorage();
+        this.isLoading = true;
         this.initializeElements();
-        this.render();
-        console.log('📋 PlaylistManager initialisé');
+        this.loadFromStorage(); // Charger depuis IndexedDB
     }
     
     initializeElements() {
@@ -18,20 +17,18 @@ class PlaylistManager {
             tabBtns: document.querySelectorAll('.tab-btn')
         };
         
-        // Événements des onglets
         if (this.elements.tabBtns) {
             this.elements.tabBtns.forEach(btn => {
                 btn.addEventListener('click', () => this.setFilter(btn.dataset.tab));
             });
         }
         
-        // Bouton tout effacer
         if (this.elements.clearAllBtn) {
             this.elements.clearAllBtn.addEventListener('click', () => this.clearAll());
         }
     }
     
-    addTrack(file) {
+    async addTrack(file) {
         const track = {
             id: Date.now() + Math.random(),
             file: file,
@@ -44,14 +41,25 @@ class PlaylistManager {
         
         console.log('➕ Ajout du track:', track.name, track.type);
         this.tracks.push(track);
-        this.saveToStorage();
+        
+        // Sauvegarder dans IndexedDB
+        if (window.storageManager) {
+            try {
+                await window.storageManager.saveTrack(track);
+                console.log('💾 Track sauvegardé dans IndexedDB');
+            } catch (error) {
+                console.error('❌ Erreur sauvegarde:', error);
+            }
+        }
+        
+        this.savePlaylistOrder();
         this.render();
         this.animateNewItem(track.id);
         
         return track;
     }
     
-    removeTrack(id) {
+    async removeTrack(id) {
         const index = this.tracks.findIndex(t => t.id === id);
         if (index !== -1) {
             const track = this.tracks[index];
@@ -63,7 +71,17 @@ class PlaylistManager {
             }
             
             this.tracks.splice(index, 1);
-            this.saveToStorage();
+            
+            // Supprimer de IndexedDB
+            if (window.storageManager) {
+                try {
+                    await window.storageManager.deleteTrack(id);
+                } catch (error) {
+                    console.error('❌ Erreur suppression:', error);
+                }
+            }
+            
+            this.savePlaylistOrder();
             this.render();
             console.log('🗑️ Track supprimé:', track.name);
         }
@@ -86,14 +104,26 @@ class PlaylistManager {
         this.render();
     }
     
-    clearAll() {
-        if (confirm('Voulez-vous vraiment supprimer tous les médias ?')) {
+    async clearAll() {
+        if (confirm('Voulez-vous vraiment supprimer tous les médias ? Cette action est irréversible.')) {
             if (window.mediaPlayer) {
                 window.mediaPlayer.pause();
                 window.mediaPlayer.currentTrack = null;
             }
+            
             this.tracks = [];
-            this.saveToStorage();
+            
+            // Vider IndexedDB
+            if (window.storageManager) {
+                try {
+                    await window.storageManager.clearAllTracks();
+                    console.log('🗑️ Tous les tracks supprimés de IndexedDB');
+                } catch (error) {
+                    console.error('❌ Erreur nettoyage:', error);
+                }
+            }
+            
+            this.savePlaylistOrder();
             this.render();
         }
     }
@@ -142,10 +172,7 @@ class PlaylistManager {
     render() {
         const filteredTracks = this.getFilteredTracks();
         
-        if (!this.elements.playlist) {
-            console.error('❌ Élément playlist introuvable');
-            return;
-        }
+        if (!this.elements.playlist) return;
         
         // Mise à jour du compteur
         if (this.elements.trackCount) {
@@ -153,6 +180,16 @@ class PlaylistManager {
         }
         
         // Afficher/masquer l'état vide
+        if (this.isLoading) {
+            this.elements.playlist.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-icon">⏳</div>
+                    <p>Chargement de votre playlist...</p>
+                </div>
+            `;
+            return;
+        }
+        
         if (filteredTracks.length === 0) {
             this.elements.playlist.innerHTML = '';
             if (this.elements.emptyState) {
@@ -163,8 +200,6 @@ class PlaylistManager {
                 this.elements.emptyState.style.display = 'none';
             }
             this.elements.playlist.innerHTML = filteredTracks.map((track, index) => this.createTrackElement(track, index)).join('');
-            
-            // Attacher les événements
             this.attachTrackEvents();
         }
     }
@@ -176,7 +211,7 @@ class PlaylistManager {
         };
         
         const typeLabel = track.type === 'audio' ? 'Audio' : 'Vidéo';
-        const badgeClass = track.type === 'audio' ? 'audio' : 'video';
+        const badgeClass = track.type;
         
         return `
             <div class="playlist-item" 
@@ -210,17 +245,13 @@ class PlaylistManager {
             
             if (!track) return;
             
-            // Clic sur l'item = ouvrir le mini-lecteur
             item.addEventListener('click', (e) => {
-                // Ne pas déclencher si on clique sur les boutons d'action
                 if (e.target.closest('.item-actions') || e.target.closest('button')) return;
-                
                 if (window.mediaPlayer) {
                     window.mediaPlayer.createInlinePlayer(track, item);
                 }
             });
             
-            // Bouton play
             const playBtn = item.querySelector('.play-item');
             if (playBtn) {
                 playBtn.addEventListener('click', (e) => {
@@ -231,7 +262,6 @@ class PlaylistManager {
                 });
             }
             
-            // Bouton delete
             const deleteBtn = item.querySelector('.delete');
             if (deleteBtn) {
                 deleteBtn.addEventListener('click', (e) => {
@@ -248,38 +278,67 @@ class PlaylistManager {
             const item = this.elements.playlist.querySelector(`[data-id="${id}"]`);
             if (item) {
                 item.style.animation = 'none';
-                item.offsetHeight; // Force reflow
+                item.offsetHeight;
                 item.style.animation = 'slideIn 0.3s ease';
             }
         }, 100);
     }
     
-    saveToStorage() {
-        try {
-            const metadata = this.tracks.map(track => ({
-                id: track.id,
-                name: track.name,
-                type: track.type,
-                size: track.size,
-                addedAt: track.addedAt
-            }));
-            localStorage.setItem('melodia-playlist', JSON.stringify(metadata));
-        } catch (e) {
-            console.warn('Impossible de sauvegarder la playlist:', e);
+    async savePlaylistOrder() {
+        const trackIds = this.tracks.map(t => t.id);
+        if (window.storageManager) {
+            await window.storageManager.savePlaylistOrder(trackIds);
         }
+        localStorage.setItem('melodia-playlist-order', JSON.stringify(trackIds));
     }
     
-    loadFromStorage() {
-        try {
-            const data = localStorage.getItem('melodia-playlist');
-            if (data) {
-                const metadata = JSON.parse(data);
-                console.log('💾 Playlist chargée:', metadata.length, 'titres (métadonnées uniquement)');
-                // Les fichiers réels ne sont pas restaurés depuis localStorage
+    async loadFromStorage() {
+        console.log('📂 Chargement de la playlist depuis IndexedDB...');
+        
+        if (window.storageManager) {
+            try {
+                // Charger les tracks depuis IndexedDB
+                const tracks = await window.storageManager.loadAllTracks();
+                
+                // Charger l'ordre sauvegardé
+                const order = await window.storageManager.loadPlaylistOrder();
+                
+                if (tracks.length > 0) {
+                    console.log(`✅ ${tracks.length} tracks chargés`);
+                    
+                    // Réorganiser selon l'ordre sauvegardé
+                    if (order.length > 0) {
+                        const orderedTracks = [];
+                        order.forEach(id => {
+                            const track = tracks.find(t => t.id === id);
+                            if (track) orderedTracks.push(track);
+                        });
+                        // Ajouter les tracks qui ne sont pas dans l'ordre
+                        tracks.forEach(track => {
+                            if (!order.includes(track.id)) {
+                                orderedTracks.push(track);
+                            }
+                        });
+                        this.tracks = orderedTracks;
+                    } else {
+                        this.tracks = tracks;
+                    }
+                    
+                    console.log('🎵 Playlist restaurée avec succès !');
+                } else {
+                    console.log('📭 Aucun track sauvegardé');
+                }
+                
+                // Afficher l'espace utilisé
+                await window.storageManager.getStorageInfo();
+                
+            } catch (error) {
+                console.error('❌ Erreur chargement:', error);
             }
-        } catch (e) {
-            console.warn('Impossible de charger la playlist:', e);
         }
+        
+        this.isLoading = false;
+        this.render();
     }
     
     formatSize(bytes) {
@@ -295,13 +354,27 @@ class PlaylistManager {
     }
 }
 
-// Initialiser quand le DOM est prêt
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        console.log('🚀 Initialisation PlaylistManager...');
-        window.playlistManager = new PlaylistManager();
-    });
-} else {
-    console.log('🚀 Initialisation PlaylistManager (DOM déjà prêt)...');
+// Initialiser quand le DOM est prêt ET que StorageManager est prêt
+async function initPlaylistManager() {
+    console.log('🚀 Initialisation PlaylistManager...');
+    
+    // Attendre que StorageManager soit initialisé
+    if (window.storageManager && window.storageManager.db === null) {
+        await new Promise(resolve => {
+            const check = setInterval(() => {
+                if (window.storageManager.db !== null) {
+                    clearInterval(check);
+                    resolve();
+                }
+            }, 100);
+        });
+    }
+    
     window.playlistManager = new PlaylistManager();
 }
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initPlaylistManager);
+} else {
+    initPlaylistManager();
+                        }
